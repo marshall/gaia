@@ -3,13 +3,13 @@
 
 'use strict';
 
-/* global MobileOperator, uuid, dump */
+/* global MobileOperator, SIMSlotManager, uuid, dump */
 
 /**
  * A simple ping that is kicked off on first time use
  */
 var FtuPing = (function() {
-  var DEBUG = false;
+  var DEBUG = true; // FIXME
 
   var debug = DEBUG ? function(msg) {
     dump('[FtuPing] ' + msg + '\n');
@@ -24,7 +24,7 @@ var FtuPing = (function() {
   var FTU_PING_TIMEOUT = 'ftu.pingTimeout';
   var FTU_PING_TRY_INTERVAL = 'ftu.pingTryInterval';
 
-  var DEFAULT_TRY_INTERVAL = 60 * 60 * 1000;
+  var DEFAULT_TRY_INTERVAL = 15 * 1000; // FIXME
   var DEFAULT_MAX_NETWORK_FAILS = 24;
   var DEFAULT_PING_TIMEOUT = 60 * 1000;
 
@@ -204,70 +204,88 @@ var FtuPing = (function() {
     pingTimer = setInterval(tryPing, tryInterval);
   }
 
-  function tryPing() {
-    // Wait until we have a valid network connection
-    var conns = window.navigator.mozMobileConnections;
-    if (!conns || conns.length === 0) {
+  function maybeThrowNetworkFailure(message) {
       networkFailCount++;
       window.asyncStorage.setItem(FTU_PING_NETWORK_FAIL_COUNT,
                                   networkFailCount);
 
       if (networkFailCount < maxNetworkFails) {
-        debug('No mobile connections, holding off (' + networkFailCount +
-              ' of ' + maxNetworkFails + ')');
+        throw message + ' (' + networkFailCount + ' of ' + maxNetworkFails +
+              ' failures)';
+      }
+  }
+
+  function checkMobileNetwork() {
+    // Wait until we have a valid network connection
+    if (SIMSlotManager.noSIMCardConnectedToNetwork()) {
+        maybeThrowNetworkFailure('No SIM cards connected to a network');
+    }
+
+    var conns = window.navigator.mozMobileConnections;
+    if (!conns || conns.length === 0) {
+      maybeThrowNetworkFailure('No mobile connections');
+      return;
+    }
+
+    var slots = SIMSlotManager.getSlots().filter(function(slot) {
+      return !slot.isLocked() && !slot.isAbsent();
+    });
+
+    if (slots.length === 0) {
+      // TODO opportunistically listen for unlock so we can pull data
+      maybeThrowNetworkFailure('No unlocked or active SIM cards found');
+    }
+
+    var conn = slots[0].conn;
+    var iccObj = navigator.mozIccManager.getIccById(conn.iccId);
+    var iccInfo = iccObj ? iccObj.iccInfo : null;
+    var voiceNetwork = conn.voice ? conn.voice.network : null;
+
+    if (!iccInfo && !voiceNetwork) {
+      maybeThrowNetworkFailure('No voice network or ICC info');
+      return;
+    }
+
+    pingData.network = MobileOperator.userFacingInfo(conn);
+    if (voiceNetwork) {
+      pingData.network.mnc = voiceNetwork.mnc;
+      pingData.network.mcc = voiceNetwork.mcc;
+    }
+
+    if (iccInfo) {
+      pingData.icc = {
+        mnc: iccInfo.mnc,
+        mcc: iccInfo.mcc,
+        spn: iccInfo.spn
+      };
+    }
+  }
+
+  function tryPing() {
+    try {
+      checkMobileNetwork();
+      if (networkFailCount >= maxNetworkFails) {
+        debug('Max number of voice network failures reached, pinging anyway!');
+        if (pingData.network === undefined) {
+          pingData.network = null;
+        }
+
+        if (pingData.icc === undefined) {
+          pingData.icc = null;
+        }
+      }
+
+      if (!pingData['deviceinfo.os']) {
+        debug('No OS information, holding off');
         return false;
       }
-    } else {
-      var conn = conns[0];
-      var iccObj = navigator.mozIccManager.getIccById(conn.iccId);
-      var iccInfo = iccObj ? iccObj.iccInfo : null;
-      var voiceNetwork = conn.voice ? conn.voice.network : null;
 
-      if (!iccInfo && !voiceNetwork) {
-        networkFailCount++;
-        window.asyncStorage.setItem(FTU_PING_NETWORK_FAIL_COUNT,
-                                    networkFailCount);
-
-        if (networkFailCount < maxNetworkFails) {
-          debug('No SIM card or voice network, holding off (' +
-                networkFailCount + ' of ' + maxNetworkFails + ')');
-          return false;
-        }
-      } else {
-        pingData.network = MobileOperator.userFacingInfo(conn);
-        if (voiceNetwork) {
-          pingData.network.mnc = voiceNetwork.mnc;
-          pingData.network.mcc = voiceNetwork.mcc;
-        }
-
-        if (iccInfo) {
-          pingData.icc = {
-            mnc: iccInfo.mnc,
-            mcc: iccInfo.mcc,
-            spn: iccInfo.spn
-          };
-        }
-      }
-    }
-
-    if (networkFailCount >= maxNetworkFails) {
-      debug('Max number of voice network failures reached, pinging anyway!');
-      if (pingData.network === undefined) {
-        pingData.network = null;
-      }
-
-      if (pingData.icc === undefined) {
-        pingData.icc = null;
-      }
-    }
-
-    if (!pingData['deviceinfo.os']) {
-      debug('No OS information, holding off');
+      FtuPing.ping();
+      return true;
+    } catch (e) {
+      debug('Error while trying FTU ping: ' + e);
       return false;
     }
-
-    FtuPing.ping();
-    return true;
   }
 
   function generatePingURL() {
