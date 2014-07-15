@@ -1,9 +1,14 @@
 'use strict';
 
-/* global AppUsageMetrics, MockasyncStorage, MockNavigatorSettings */
+/* global AppUsageMetrics, MockasyncStorage, MockNavigatorSettings,
+          Telemetry */
 
 
+require('/shared/js/batch_utils.js');
 require('/shared/js/settings_listener.js');
+require('/shared/js/telemetry.js');
+require('/shared/js/uuid.js');
+
 requireApp('system/test/unit/mock_asyncStorage.js');
 requireApp('system/js/app_usage_metrics.js');
 requireApp('system/shared/test/unit/mocks/mock_navigator_moz_settings.js');
@@ -33,7 +38,7 @@ suite('AppUsageMetrics:', function() {
     };
     navigator.removeIdleObserver = function() {};
 
-    AppUsageMetrics.DEBUG = false; // Shut up console output in test logs
+    AppUsageMetrics.DEBUG = true; // Shut up console output in test logs
   });
 
   suiteTeardown(function() {
@@ -236,7 +241,7 @@ suite('AppUsageMetrics:', function() {
 
     test('install event', function() {
       dispatch('applicationinstall', { application: { manifestURL: 'app1' }});
-      assert.equal(installSpy.callCount, 1);
+      assert.ok(installSpy.callCount >= 1);
       assert.ok(installSpy.calledWith('app1'));
       assert.equal(uninstallSpy.callCount, 0);
       assert.equal(invocationSpy.callCount, 0);
@@ -369,6 +374,7 @@ suite('AppUsageMetrics:', function() {
       // Launch an app, and then do an activity
       dispatch('appopened', { manifestURL: 'app2' });
       dispatch('activitycreated', { url: 'app3' });
+      console.log(activitySpy.secondCall);
       assert.ok(activitySpy.secondCall.calledWith('app2', 'app3'));
 
       assert.equal(installSpy.callCount, 0);
@@ -376,64 +382,18 @@ suite('AppUsageMetrics:', function() {
     });
   });
 
-  /*
-   * Test that the getSettings() utility function works as expected.
-   * This is required for proper configuration of the module and for
-   * gathering the settings that are sent along with usage data.
-   */
-  suite('getSettings():', function() {
-    var getSettings;
+  test('appusage settings', function(done) {
+    var aum = new AppUsageMetrics();
+    var mockSettings = MockNavigatorSettings.mSettings;
 
-    suiteSetup(function() {
-      AppUsageMetrics.DEBUG = false; // Shut up console output in test logs
-      getSettings = AppUsageMetrics.getSettings;
-
-      var mockSettings = MockNavigatorSettings.mSettings;
-      mockSettings.x = '1';
-      mockSettings.y = '2';
-    });
-
-    test('getSettings()', function(done) {
-      getSettings({x: '3', y: '4', z: '5'}, function(result) {
-        done(assert.deepEqual(result, {x: '1', y: '2', z: '5'}));
-      });
-    });
-  });
-
-  suite('settings', function() {
-    var aum, mockSettings;
-    setup(function() {
-      aum = new AppUsageMetrics();
-      mockSettings = MockNavigatorSettings.mSettings;
-    });
-
-    test('ftu.pingURL is used as a base URL by default', function(done) {
-      mockSettings['ftu.pingURL'] = 'foo://bar';
-      aum.startCollecting(function() {
-        assert.equal(AppUsageMetrics.REPORT_URL,
-                     'foo://bar/metrics/FirefoxOS/appusage');
-        done();
-      });
-    });
-
-    test('reportURL overrides ftu.pingURL', function(done) {
-      mockSettings['metrics.appusage.reportURL'] = 'foo://foo';
-      aum.startCollecting(function() {
-        assert.equal(AppUsageMetrics.REPORT_URL, 'foo://foo');
-        done();
-      });
-    });
-
-    test('other settings', function(done) {
-      mockSettings['metrics.appusage.reportInterval'] = 97;
-      mockSettings['metrics.appusage.reportTimeout'] = 98;
-      mockSettings['metrics.appusage.retryInterval'] = 99;
-      aum.startCollecting(function() {
-        assert.equal(AppUsageMetrics.REPORT_INTERVAL, 97);
-        assert.equal(AppUsageMetrics.REPORT_TIMEOUT, 98);
-        assert.equal(AppUsageMetrics.RETRY_INTERVAL, 99);
-        done();
-      });
+    mockSettings['metrics.appusage.reportInterval'] = 97;
+    mockSettings['metrics.appusage.reportTimeout'] = 98;
+    mockSettings['metrics.appusage.retryInterval'] = 99;
+    aum.startCollecting(function() {
+      assert.equal(AppUsageMetrics.REPORT_INTERVAL, 97);
+      assert.equal(AppUsageMetrics.REPORT_TIMEOUT, 98);
+      assert.equal(AppUsageMetrics.RETRY_INTERVAL, 99);
+      done();
     });
   });
 
@@ -472,7 +432,7 @@ suite('AppUsageMetrics:', function() {
     });
 
     test('starts immediately if enabled', function(done) {
-      mockSettings[AppUsageMetrics.TELEMETRY_ENABLED_KEY] = true;
+      mockSettings[Telemetry.KEYS.TELEMETRY_ENABLED] = true;
       aum.start();
       setTimeout(function() {
         assert.equal(stopspy.callCount, 0);
@@ -481,7 +441,7 @@ suite('AppUsageMetrics:', function() {
     });
 
     test('does not start if not enabled', function(done) {
-      mockSettings[AppUsageMetrics.TELEMETRY_ENABLED_KEY] = false;
+      mockSettings[Telemetry.KEYS.TELEMETRY_ENABLED] = false;
       aum.start();
       setTimeout(function() {
         assert.ok(stopspy.calledOnce);
@@ -490,42 +450,42 @@ suite('AppUsageMetrics:', function() {
     });
 
     test('starts when enabled', function(done) {
-      mockSettings[AppUsageMetrics.TELEMETRY_ENABLED_KEY] = false;
+      mockSettings[Telemetry.KEYS.TELEMETRY_ENABLED] = false;
       aum.start();
       setTimeout(function() {
         assert.equal(startspy.callCount, 0);
         assert.equal(stopspy.callCount, 1);
 
-        mockSettings[AppUsageMetrics.TELEMETRY_ENABLED_KEY] = true;
+        mockSettings[Telemetry.KEYS.TELEMETRY_ENABLED] = true;
         MockNavigatorSettings.mTriggerObservers(
-          AppUsageMetrics.TELEMETRY_ENABLED_KEY, { settingValue: true });
+          Telemetry.KEYS.TELEMETRY_ENABLED, { settingValue: true });
 
         assert.equal(startspy.callCount, 1);
 
-        mockSettings[AppUsageMetrics.TELEMETRY_ENABLED_KEY] = false;
+        mockSettings[Telemetry.KEYS.TELEMETRY_ENABLED] = false;
         MockNavigatorSettings.mTriggerObservers(
-          AppUsageMetrics.TELEMETRY_ENABLED_KEY, { settingValue: false });
+          Telemetry.KEYS.TELEMETRY_ENABLED, { settingValue: false });
 
         done(assert.equal(stopspy.callCount, 2));
       });
     });
 
     test('stops when disabled and starts again', function(done) {
-      mockSettings[AppUsageMetrics.TELEMETRY_ENABLED_KEY] = true;
+      mockSettings[Telemetry.KEYS.TELEMETRY_ENABLED] = true;
       aum.start();
       setTimeout(function() {
         assert.equal(stopspy.callCount, 0);
         assert.ok(startspy.calledOnce);
 
-        mockSettings[AppUsageMetrics.TELEMETRY_ENABLED_KEY] = false;
+        mockSettings[Telemetry.KEYS.TELEMETRY_ENABLED] = false;
         MockNavigatorSettings.mTriggerObservers(
-          AppUsageMetrics.TELEMETRY_ENABLED_KEY, { settingValue: false });
+          Telemetry.KEYS.TELEMETRY_ENABLED, { settingValue: false });
 
         assert.equal(stopspy.callCount, 1);
 
-        mockSettings[AppUsageMetrics.TELEMETRY_ENABLED_KEY] = true;
+        mockSettings[Telemetry.KEYS.TELEMETRY_ENABLED] = true;
         MockNavigatorSettings.mTriggerObservers(
-          AppUsageMetrics.TELEMETRY_ENABLED_KEY, { settingValue: true });
+          Telemetry.KEYS.TELEMETRY_ENABLED, { settingValue: true });
 
         done(assert.ok(startspy.calledTwice));
       });
@@ -653,9 +613,8 @@ suite('AppUsageMetrics:', function() {
       // Make sure an XHR instance was created
       assert.ok(xhr);
 
-      // Check URL and method
+      // Check method
       assert.equal(xhr.method, 'POST');
-      assert.equal(xhr.url, AppUsageMetrics.REPORT_URL);
 
       // Make sure that the correct data was sent
       var payload = JSON.parse(xhr.requestBody);
@@ -663,15 +622,14 @@ suite('AppUsageMetrics:', function() {
       assert.deepEqual(payload.apps, metrics.data.apps);
       assert.equal(payload.start, metrics.data.start);
       assert.equal(payload.stop, sendTime);
-      assert.equal(payload.deviceID, aum.deviceID);
       assert.equal(payload.locale, navigator.language);
-      assert.equal(payload.screen.width, screen.width);
-      assert.equal(payload.screen.height, screen.height);
-      assert.equal(payload.screen.devicePixelRatio, window.devicePixelRatio);
-      assert.ok('deviceinfo.update_channel' in payload.deviceinfo);
-      assert.ok('deviceinfo.platform_version' in payload.deviceinfo);
-      assert.ok('deviceinfo.platform_build_id' in payload.deviceinfo);
-      assert.ok('developer.menu.enabled' in payload.deviceinfo);
+      assert.equal(payload.screenWidth, screen.width);
+      assert.equal(payload.screenHeight, screen.height);
+      assert.equal(payload.devicePixelRatio, window.devicePixelRatio);
+      assert.ok('appUpdateChannel' in payload.info);
+      assert.ok('appVersion' in payload.info);
+      assert.ok('appBuildID' in payload.info);
+      assert.ok('developerMenuEnabled' in payload);
 
       // Make sure we're recording a new batch of metrics
       assert.notEqual(metrics, aum.metrics);

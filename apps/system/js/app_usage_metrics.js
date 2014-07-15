@@ -17,7 +17,7 @@
  *  normal app termination from abnormal and I can't figure out any way
  *  to tell when an app has crashed.
  */
-/* global asyncStorage, SettingsListener */
+/* global asyncStorage, SettingsListener, BatchSettings, Telemetry */
 (function(exports) {
   'use strict';
 
@@ -28,9 +28,6 @@
   // This is the asyncStorage key we use to persist our app usage data so
   // that it survives across device restarts.
   const PERSISTENCE_KEY = 'metrics.app_usage.data';
-
-  // This is the asyncStorage key we use to persist our device ID
-  const DEVICE_ID_KEY = 'metrics.app_usage.deviceID';
 
   // Various event types we use. Constants here to be sure we use the
   // same values when registering, unregistering and handling these.
@@ -93,18 +90,6 @@
     }
   }
 
-  // What setting do we listen to to turn app usage metrics on or off.
-  // This default value is the same setting that turns telemetry on and off.
-  AUM.TELEMETRY_ENABLED_KEY = 'debug.performance_data.shared';
-
-  // Base URL for sending data reports
-  // Can be overridden with ftu.pingURL setting.
-  AUM.BASE_URL = 'https://fxos.telemetry.mozilla.org/submit/telemetry';
-
-  // Where do we send our data reports
-  // Can be overridden with metrics.appusage.reportURL setting.
-  AUM.REPORT_URL = AUM.BASE_URL + '/metrics/FirefoxOS/appusage';
-
   // How often do we try to send the reports
   // Can be overridden with metrics.appusage.reportInterval setting.
   AUM.REPORT_INTERVAL = 24 * 60 * 60 * 1000;  // 1 day
@@ -151,7 +136,7 @@
       }
     }.bind(this);
 
-    SettingsListener.observe(AUM.TELEMETRY_ENABLED_KEY,
+    SettingsListener.observe(Telemetry.KEYS.TELEMETRY_ENABLED,
                              false, this.metricsEnabledListener);
   };
 
@@ -160,7 +145,7 @@
   // used to stop data collection but keep the module running.
   AUM.prototype.stop = function stop() {
     this.stopCollecting();
-    SettingsListener.unobserve(AUM.TELEMETRY_ENABLED_KEY,
+    SettingsListener.unobserve(Telemetry.KEYS.TELEMETRY_ENABLED,
                                this.metricsEnabledListener);
   };
 
@@ -175,10 +160,6 @@
     // Note that this object includes a start time for the batch so we know
     // how old it is.
     this.metrics = null;
-
-    // This is the unique string we send with each batch of data so that
-    // batches can be linked together into larger time periods
-    this.deviceID = null;
 
     // Are we online? Initialized in startCollecting() and updated in
     // handleEvent() based on online and offline events
@@ -234,48 +215,21 @@
         self.metrics = loadedMetrics;
 
         // Now move on to step two in the startup process
-        getDeviceID();
-      });
-    }
-
-    // Step 2: Look up, or generate a unique identifier for this device
-    // so that the periodic metrics reports we send can be linked together
-    // to allow analysis over a longer period of time. If the user ever turns
-    // off telemetry we will delete this id, so that if it is turned back
-    // on, they start off with a clean history
-    function getDeviceID() {
-      asyncStorage.getItem(DEVICE_ID_KEY, function(value) {
-        if (value) {
-          self.deviceID = value;
-        }
-        else {
-          // Our device id does not need to be unique, just probably unique.
-          // And it doesn't even need to be a real UUID
-          self.deviceID = Math.random().toString(36).substring(2, 10);
-          asyncStorage.setItem(DEVICE_ID_KEY, self.deviceID);
-        }
-
-        // Move on to the next step in the startup process
         getConfigurationSettings();
       });
     }
 
-    // Step 3: Configure the server url and other variables by
+    // Step 2: Configure the server url and other variables by
     // allowing values in the settings database to override the defaults.
     function getConfigurationSettings() {
       // Settings to query, mapped to default values
-      var query = {
-        'ftu.pingURL': AUM.BASE_URL,
-        'metrics.appusage.reportURL': null,
+      var batch = new BatchSettings({
         'metrics.appusage.reportInterval': AUM.REPORT_INTERVAL,
         'metrics.appusage.reportTimeout': AUM.REPORT_TIMEOUT,
         'metrics.appusage.retryInterval': AUM.RETRY_INTERVAL
-      };
+      });
 
-      AUM.getSettings(query, function(result) {
-        AUM.REPORT_URL = result['metrics.appusage.reportURL'] ||
-                         result['ftu.pingURL'] + '/metrics/FirefoxOS/appusage';
-
+      batch.getAll(function(result) {
         AUM.REPORT_INTERVAL = result['metrics.appusage.reportInterval'];
         AUM.REPORT_TIMEOUT = result['metrics.appusage.reportTimeout'];
         AUM.RETRY_INTERVAL = result['metrics.appusage.retryInterval'];
@@ -285,7 +239,7 @@
       });
     }
 
-    // Step 4: register the various event handlers we need
+    // Step 3: register the various event handlers we need
     function registerHandlers() {
       // Basic event handlers
       EVENT_TYPES.forEach(function(type) {
@@ -320,7 +274,6 @@
 
     // Delete stored data and our device id
     asyncStorage.removeItem(PERSISTENCE_KEY);
-    asyncStorage.removeItem(DEVICE_ID_KEY);
 
     // Stop listening to all events
     navigator.removeIdleObserver(this.idleObserver);
@@ -331,7 +284,7 @@
       window.removeEventListener(type, self);
     });
 
-    // Reset our state, discarding local copies of metrics and deviceID
+    // Reset our state, discarding local copies of metrics
     this.reset();
   };
 
@@ -505,55 +458,32 @@
     // Add some extra data that we want to transmit. These are not things
     // that need to be persisted with the other data, so we just add it now.
     data.stop = Date.now();           // End of batch time; matches data.start
-    data.deviceID = this.deviceID;    // Link to other batches
-    data.locale = navigator.language; // Information about the user's language
-    data.screen = {                   // Information about screen size
-      width: screen.width,
-      height: screen.height,
-      devicePixelRatio: window.devicePixelRatio
-    };
 
-    var deviceInfoQuery = {
-      'deviceinfo.update_channel': 'unknown',
-      'deviceinfo.platform_version': 'unknown',
-      'deviceinfo.platform_build_id': 'unknown',
-      'developer.menu.enabled': false // If true, data is probably an outlier
-    };
-
-    // Query the settings db to get some more device-specific information
-    AUM.getSettings(deviceInfoQuery, function(deviceinfo) {
-      data.deviceinfo = deviceinfo;
-      // Now transmit the data
-      send(data);
+    var telemetry = new Telemetry({
+      reason: 'appusage',
+      sendTimeout: AUM.REPORT_TIMEOUT,
     });
 
-    function send(data) {
-      var xhr = new XMLHttpRequest({ mozSystem: true, mozAnon: true });
-      xhr.open('POST', AUM.REPORT_URL);
-      xhr.timeout = AUM.REPORT_TIMEOUT;
-      xhr.setRequestHeader('Content-type', 'application/json');
-      xhr.responseType = 'text';
-      xhr.send(JSON.stringify(data));
-
-      // We don't actually have to do anything if the data is transmitted
-      // successfully. We are already set up to collect the next batch of data.
-      xhr.onload = function() {
-        debug('Transmitted app usage data to', AUM.REPORT_URL);
-      };
-
-      xhr.onerror = xhr.onabort = xhr.ontimeout = function retry(e) {
-        // If the attempt to transmit a batch of data fails, we'll merge
-        // the new batch of data (which may be empty) in with the old one
-        // and resave everything so we can try again later. We also record
-        // the time of this failure so we don't try sending again too soon.
-        debug('App usage metrics transmission failure:', e.type);
-
-        self.lastFailedTransmission = Date.now();
-        oldMetrics.merge(self.metrics);
-        self.metrics = oldMetrics;
-        self.metrics.save(true);
-      };
+    // We don't actually have to do anything if the data is transmitted
+    // successfully. We are already set up to collect the next batch of data.
+    function sendSuccess(request) {
+      debug('Transmitted app usage data to', request.url);
     }
+
+    function sendError(request, e) {
+      // If the attempt to transmit a batch of data fails, we'll merge
+      // the new batch of data (which may be empty) in with the old one
+      // and resave everything so we can try again later. We also record
+      // the time of this failure so we don't try sending again too soon.
+      debug('App usage metrics transmission failure:', e.type);
+
+      self.lastFailedTransmission = Date.now();
+      oldMetrics.merge(self.metrics);
+      self.metrics = oldMetrics;
+      self.metrics.save(true);
+    }
+
+    telemetry.sendTelemetry(data, sendSuccess, sendError);
   };
 
   /*
@@ -693,39 +623,6 @@
       }
       callback(usage);
     });
-  };
-
-  /*
-   * A utility function get values for all of the specified settings.
-   * settingKeysAndDefaults is an object that maps settings keys to default
-   * values. We query the value of each of those settings and then create an
-   * object that maps keys to values (or to the default values) and pass
-   * that object to the callback function.
-   */
-  AUM.getSettings = function getSettings(settingKeysAndDefaults, callback) {
-    var pendingQueries = 0;
-    var results = {};
-    var lock = window.navigator.mozSettings.createLock();
-    for (var key in settingKeysAndDefaults) {
-      var defaultValue = settingKeysAndDefaults[key];
-      query(key, defaultValue);
-      pendingQueries++;
-    }
-
-    function query(key, defaultValue) {
-      var request = lock.get(key);
-      request.onsuccess = function() {
-        var value = request.result[key];
-        if (value === undefined || value === null) {
-          value = defaultValue;
-        }
-        results[key] = value;
-        pendingQueries--;
-        if (pendingQueries === 0) {
-          callback(results);
-        }
-      };
-    }
   };
 
   // The AppUsageMetrics constructor is the single value we export.
