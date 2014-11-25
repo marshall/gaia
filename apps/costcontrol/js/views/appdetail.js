@@ -106,11 +106,8 @@ var AppDetailView = (function() {
       });
 
       els.allowMobileDataUse.addEventListener('change', function(evt) {
-        if (els.allowMobileDataUse.checked) {
-          navigator.mozApps.mgmt.enableMobileData(app);
-        } else {
-          navigator.mozApps.mgmt.disableMobileData(app);
-        }
+        var enabled = els.allowMobileDataUse.checked;
+        navigator.mozApps.mgmt.setMobileDataEnabled(app, enabled);
       });
 
       initialized = true;
