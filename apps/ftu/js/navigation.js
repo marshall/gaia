@@ -241,6 +241,18 @@ var Navigation = {
         var improve = document.getElementById('browser_os_improve');
         navigator.mozL10n.setAttributes(improve, 'helpImprove2',
           getLocalizedLink('helpImprove'));
+
+        // Initialize the share checkbox according to the preset value
+        // of debug.performance_data.shared
+        var sharePerformance = document.getElementById('share-performance');
+        var setting = sharePerformance.name;
+        var settings = navigator.mozSettings;
+        var req = settings && settings.createLock().get(setting);
+        if (req) {
+          req.onsuccess = function() {
+            sharePerformance.checked = req.result[setting] || false;
+          };
+        }
         break;
       case '#browser_privacy':
         UIManager.mainTitle.setAttribute('data-l10n-id', 'aboutBrowser');
